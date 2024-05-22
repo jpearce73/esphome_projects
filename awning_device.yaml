@@ -1,0 +1,14 @@
+#
+# Use this to create a new Awning Window Device.
+# Update the name and friendly_name entries, save and install.
+#
+substitutions:
+  name: esphome-web-c613f8
+  friendly_name: ESPHome Web c613f8
+
+packages:
+  awning_window: github://jpearce73/esphome_projects/awning_window.yaml
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
