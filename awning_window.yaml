@@ -10,7 +10,7 @@ esphome:
       - lambda: id(boot_count) = id(boot_count) + 1;
       - output.turn_off: mode
       - switch.turn_on: motor_sleep
-      - switch.turn_off: motor_en
+      - output.turn_off: motor_en
       - switch.turn_off: motor_dir
       - lambda: id(window_stuck).publish_state(false);
       
@@ -79,17 +79,19 @@ number:
     min_value: 0
     max_value: 200000
     step: 100
+    restore_value: true
     optimistic: true
+
 
 switch:
   # Motor is controlled by these three switches
   #  motor_sleep, motor_en, motor_dir
-  - platform: gpio
-    pin: GPIO21
-    name: "Motor Enable"
-    internal: true
-    id: motor_en
-    inverted: False
+#  - platform: gpio
+#    pin: GPIO21
+#    name: "Motor Enable"
+#    internal: true
+#    id: motor_en
+#    inverted: False
   - platform: gpio
     pin: GPIO19
     name: "Motor Direction"
@@ -113,9 +115,16 @@ switch:
       - switch.turn_off: motor_sleep
       - delay: 2ms
       - switch.turn_on: motor_dir
-      - switch.turn_on: motor_en
+      - output.turn_on: motor_en
+      - output.set_level:
+          id: motor_en
+          level: "50%"
+      - delay: 100ms
+      - output.set_level:
+          id: motor_en
+          level: "100%"
     turn_off_action:
-      - switch.turn_off: motor_en
+      - output.turn_off: motor_en
       - switch.turn_on: motor_sleep
 
   - platform: template
@@ -127,18 +136,34 @@ switch:
       - switch.turn_off: motor_sleep
       - delay: 2ms
       - switch.turn_off: motor_dir
-      - switch.turn_on: motor_en
+      - output.turn_on: motor_en
+      # Simple Soft Start
+      - output.set_level:
+          id: motor_en
+          level: "50%"
+      - delay: 100ms
+      - output.set_level:
+          id: motor_en
+          level: "100%"
     turn_off_action:
-      - switch.turn_off: motor_en
+      - output.turn_off: motor_en
       - switch.turn_on: motor_sleep
 
   - platform: template
     id: restart_motor
     optimistic: True
     turn_on_action:
-      - switch.turn_off: motor_en
+      - output.turn_off: motor_en
       - delay: 100ms
-      - switch.turn_on: motor_en
+      - output.turn_on: motor_en
+      # Simple Soft Start
+      - output.set_level:
+          id: motor_en
+          level: "50%"
+      - delay: 100ms
+      - output.set_level:
+          id: motor_en
+          level: "100%"
       - switch.turn_off: restart_motor
   
   - platform: gpio
@@ -174,6 +199,11 @@ output:
   - platform: gpio
     pin: GPIO18
     id: mode
+  - platform: ledc
+    pin: GPIO21
+    id: motor_en
+    frequency: 10000Hz
+
 
 sensor:
   - platform: uptime
@@ -231,7 +261,7 @@ sensor:
       // Gear box has a ~600:1 reduction ratio, one user said it was 576:1. SOmeone reported 6400 pulses per rotation
       speed = float((id(encoder).state - last_value)) / 6400.0 / 1 * 60.0;
       last_value = id(encoder).state;
-      if (id(motor_en).state){
+      if (id(motor_close).state || id(motor_open).state){
         return speed;
       } else {
         return 0.0;
@@ -250,17 +280,17 @@ sensor:
     name: "Position"
     entity_category: "diagnostic"
     lambda: |-
-        return (100 * id(encoder).state / (id(max_position).state-id(min_position)));
+        return round((100 * id(encoder).state / (id(max_position).state-id(min_position))));
     unit_of_measurement: 'percent'
     accuracy_decimals: 0
     update_interval: 1s
     filters:
       - clamp:
           min_value: 0
-          max_value: 101
+          max_value: 100
       - or:
           - throttle: 300s # send a periodic update every 5 minutes
-          - delta: 1.0     # send an update when there is a change
+          - delta: 1.0    # send an update when there is a change
     on_value:
       - lambda: |-
           float pos;
@@ -366,6 +396,7 @@ binary_sensor:
       - lambda: |-
           ESP_LOGE("awning", "Over Current Detected, executing stop_action");
           id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
+          id(awning).publish_state();
           id(target_position) = id(position).state;
           id(window_was_moving) = 0;
           id(motor_close).turn_off();
@@ -429,11 +460,13 @@ cover:
           // No special handling to open to endstop.
           id(motor_open).turn_off();            
           id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
+          id(awning).publish_state();
           ESP_LOGI("awning", "Opening to %d%% and reached target %d%%", (int)id(position).state, id(target_position));
         } else if (id(opened_to_endstop)){
           // We opened to the endstop before reaching position target. Unexpected!
           id(motor_open).turn_off();            
           id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
+          id(awning).publish_state();
           if (id(target_position) >= 10 && id(position).state < 10){
             ESP_LOGI("awning", "Window appears to be locked, opened to unexpected endstop when position was %d%%", (int)id(position).state);
             return COVER_CLOSED;
@@ -442,6 +475,10 @@ cover:
           }
         } else {
           // We are continuing to open
+          if ((id(target_position) - id(position).state) < 5){
+            // Slow down close to target
+            id(motor_en).set_level(0.25);
+          }
           if (id(speed).state > 1){
             // Window is moving
             id(window_was_moving) = 1;
@@ -459,6 +496,7 @@ cover:
             id(motor_close).turn_off();
             ESP_LOGI("awning", "Closed to %d%% when target was %d%%", (int)id(position).state,(int)id(target_position));
             id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
+            id(awning).publish_state();
           } else {
             // We are trying to fully close
             if (id(closed_to_endstop)){
@@ -473,6 +511,7 @@ cover:
                 id(encoder_at_endstop).publish_state(id(encoder).state);
                 id(closing_to_endstop) = 0;
                 id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
+                id(awning).publish_state();
             } else if (id(closing_to_endstop)) {
                 // Need to close to endstop, turn the motor back on
                 if (id(speed).state < -1){
@@ -499,8 +538,13 @@ cover:
             }
             id(encoder_at_endstop).publish_state(id(encoder).state);
             id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
+            id(awning).publish_state();
         } else {
           // We are continuing to close
+          if ((id(position).state - id(target_position)) < 5){
+            // Slow down close to target
+            id(motor_en).set_level(0.25);
+          }
           if (id(speed).state < -1){
             // Window is moving
             id(window_was_moving) = 1;
@@ -510,7 +554,10 @@ cover:
         }
       } else {
         // We are idle, return last state
-        id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
+        if (id(awning).current_operation != esphome::cover::COVER_OPERATION_IDLE){
+          id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
+          id(awning).publish_state();
+        }
         return {};
       }
       return {};
