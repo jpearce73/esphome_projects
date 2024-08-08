@@ -5,14 +5,15 @@ esphome:
   project:
     name: esphome.web
     version: '1.0'
+  includes:
+    - awning_window.h
   on_boot:
     then:
       - lambda: id(boot_count) = id(boot_count) + 1;
       - output.turn_off: mode
-      - switch.turn_on: motor_sleep
+      - output.turn_on: motor_sleep
       - output.turn_off: motor_en
-      - switch.turn_off: motor_dir
-      - lambda: id(window_stuck).publish_state(false);
+      - output.turn_off: motor_dir
       
 esp32:
   board: esp32dev
@@ -28,48 +29,30 @@ api:
 
 # Allow Over-The-Air updates
 ota:
-
+  platform: esphome
+  password: !secret ota_password
+  
 # Allow provisioning Wi-Fi via serial
 improv_serial:
 
 wifi:
   # Set up a wifi access point
   ap: {}
+  power_save_mode: none
 
 # In combination with the `ap` this allows the user
 # to provision wifi credentials to the device via WiFi AP.
 captive_portal:
 
 globals:
-  - id: min_position
-    type: int
-    restore_value: false
-    initial_value: '0'
-  - id: target_position
-    type: int
-    restore_value: true
-    initial_value: '0'
   - id: boot_count
     type: int
     restore_value: true
     initial_value: '0'
-  - id: closed_to_endstop 
-    type: int
-    initial_value: '0'
-  - id: closing_to_endstop 
-    type: int
-    initial_value: '0'
-  - id: opened_to_endstop 
-    type: int
-    initial_value: '0'
-  - id: restarts_remaining
-    type: int
-    initial_value: '0'
-  - id: window_was_moving
-    type: int
-    initial_value: '0'
 
 number:
+  # Configuration for the maximum value of the encoder to represent open
+  # Closed is always encoder reset, or zero.
   - platform: template
     name: Encoder Maximum
     id: max_position
@@ -77,124 +60,152 @@ number:
     entity_category: config
     disabled_by_default: False
     min_value: 0
-    max_value: 200000
-    step: 100
+    max_value: 100
+    step: 0.125
     restore_value: true
     optimistic: true
 
+  # This debug component allows us to specify a number of roations
+  # to move the motor. Can be used for manual calibration.
+  - platform: template
+    name: Manual Move
+    id: manual_move
+    mode: box
+    entity_category: config
+    disabled_by_default: True
+    min_value: -100
+    max_value: 100
+    step: 0.125
+    initial_value: 0
+    restore_value: false
+    optimistic: true
+    on_value: 
+      then:
+        - lambda: |-
+            if (x != 0){
+              id(target).publish_state(id(encoder).state+x);
+              if (id(encoder).state > id(target).state){
+                id(awning).current_operation = esphome::cover::COVER_OPERATION_CLOSING;
+                id(awning).publish_state();
+                id(motor_close).turn_on();
+              } else if (id(encoder).state < id(target).state){
+                id(awning).current_operation = esphome::cover::COVER_OPERATION_OPENING;
+                id(awning).publish_state();
+                id(motor_open).turn_on();
+              }
+            }
 
 switch:
-  # Motor is controlled by these three switches
-  #  motor_sleep, motor_en, motor_dir
-#  - platform: gpio
-#    pin: GPIO21
-#    name: "Motor Enable"
-#    internal: true
-#    id: motor_en
-#    inverted: False
-  - platform: gpio
-    pin: GPIO19
-    name: "Motor Direction"
-    internal: true
-    id: motor_dir
-    inverted: False
-  - platform: gpio
-    pin: GPIO4
-    name: "Motor Sleep"
-    disabled_by_default: true
-    id: motor_sleep
-    inverted: True
-
-  # Two internal signals allow open & close requests
+  # Configuration  
   - platform: template
-    name: "Close"
-    internal: true
-    id: motor_close
-    optimistic: true
-    turn_on_action:
-      - switch.turn_off: motor_sleep
-      - delay: 2ms
-      - switch.turn_on: motor_dir
-      - output.turn_on: motor_en
-      - output.set_level:
-          id: motor_en
-          level: "50%"
-      - delay: 100ms
-      - output.set_level:
-          id: motor_en
-          level: "100%"
-    turn_off_action:
-      - output.turn_off: motor_en
-      - switch.turn_on: motor_sleep
-
-  - platform: template
-    name: "Open"
-    internal: true
-    id: motor_open
-    optimistic: true
-    turn_on_action:
-      - switch.turn_off: motor_sleep
-      - delay: 2ms
-      - switch.turn_off: motor_dir
-      - output.turn_on: motor_en
-      # Simple Soft Start
-      - output.set_level:
-          id: motor_en
-          level: "50%"
-      - delay: 100ms
-      - output.set_level:
-          id: motor_en
-          level: "100%"
-    turn_off_action:
-      - output.turn_off: motor_en
-      - switch.turn_on: motor_sleep
-
-  - platform: template
-    id: restart_motor
-    optimistic: True
-    turn_on_action:
-      - output.turn_off: motor_en
-      - delay: 100ms
-      - output.turn_on: motor_en
-      # Simple Soft Start
-      - output.set_level:
-          id: motor_en
-          level: "50%"
-      - delay: 100ms
-      - output.set_level:
-          id: motor_en
-          level: "100%"
-      - switch.turn_off: restart_motor
-  
-  - platform: gpio
-    pin: GPIO27
-    name: "Encoder Reset"
-    disabled_by_default: true
+    name: Quiet Mode
+    disabled_by_default: false
     entity_category: config
-    id: encoder_reset
-    inverted : False
-    on_turn_on:
-      - delay: 500ms
-      - switch.turn_off: encoder_reset
+    id: quiet_mode
+    optimistic: True
+    restore_mode: RESTORE_DEFAULT_OFF
 
   - platform: template
     name: Close to Endstop
-    disabled_by_default: true
+    disabled_by_default: false
     entity_category: config
     id: close_to_endstop
     optimistic: True
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  # Two internal switch signals provide high level open / close commands
+  - platform: template
+    name: "Close"
+    id: motor_close
+    entity_category: diagnostic
+    disabled_by_default: True
+    optimistic: true
+    turn_on_action:
+      # Allow motor driver to wake
+      - output.turn_off: motor_sleep
+      - delay: 2ms
+      # Set the direction
+      - output.turn_on: motor_dir
+      - output.turn_on: motor_en
+      # Simple Soft Start to prevent large inrush which will stress power supply
+      - output.set_level:
+          id: motor_en
+          level: "90%"
+      # After this the control sensor takes over...
+    turn_off_action:
+      - lambda: id(pwm).publish_state(0);
+      - output.turn_off: motor_en
+      - output.turn_on: motor_sleep
+  - platform: template
+    name: "Open"
+    id: motor_open
+    entity_category: diagnostic
+    disabled_by_default: True
+    optimistic: true
+    turn_on_action:
+      # Allow motor driver to wake
+      - output.turn_off: motor_sleep
+      - delay: 2ms
+      # Set the direction
+      - output.turn_off: motor_dir
+      - output.turn_on: motor_en
+      # Simple Soft Start to prevent large inrush which will stress power supply
+      - output.set_level:
+          id: motor_en
+          level: "90%"
+      # After this the control sensor takes over...
+    turn_off_action:
+      - lambda: id(pwm).publish_state(0);
+      - output.turn_off: motor_en
+      - output.turn_on: motor_sleep
 
 button:
+  # Allow boot counter to be reset by UI
   - platform: template
+    id : boot_count_reset
     name: "Boot Count Reset"
     entity_category: config
-    disabled_by_default: true
-    id : boot_count_reset
+    disabled_by_default: false
     on_press:
       - lambda: id(boot_count) = 0;
 
-# Drive the Mode pin, see on_boot above
-# This is just a constant for the application
+  # Trigger hardware reset of the rotary encoder from UI
+  - platform: template
+    id : encoder_reset
+    name: "Encoder Reset"
+    entity_category: config
+    disabled_by_default: false
+    on_press: 
+      then:
+        - output.turn_on: encoder_reset_signal
+        - delay: 500ms
+        - output.turn_off: encoder_reset_signal
+        - lambda: id(encoder).publish_state(0);
+
+  # Trigger hardware reset of the rotary encoder from UI
+  - platform: template
+    id : calibrate_closed
+    name: "Calibrate Closed"
+    entity_category: config
+    disabled_by_default: false
+    on_press: 
+      then:
+        - output.turn_on: encoder_reset_signal
+        - delay: 500ms
+        - output.turn_off: encoder_reset_signal
+        - lambda: |-
+            id(encoder).publish_state(0);
+            id(target).publish_state(id(encoder).state);
+            id(at_target).publish_state(true);
+            id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
+            id(awning).position = 0;
+            id(awning).publish_state();
+
+
+# Define the output pins
+# Only special pin is motor_en which is PWM. Using PWM to control
+# the motor was essential. Using a simple switch caused large inrush
+# current and power supply issues. Need PWM and need soft-start.
 output:
   - platform: gpio
     pin: GPIO18
@@ -203,9 +214,24 @@ output:
     pin: GPIO21
     id: motor_en
     frequency: 10000Hz
-
+  - platform: gpio
+    pin: GPIO19
+    id: motor_dir
+  - platform: gpio
+    pin: GPIO4
+    id: motor_sleep
+    inverted: True
+  - platform: gpio
+    pin: GPIO27
+    id: encoder_reset_signal
 
 sensor:
+  - platform: wifi_signal # Reports the WiFi signal strength/RSSI in dB
+    name: "WiFi Signal dB"
+    id: wifi_signal_db
+    update_interval: 60s
+    entity_category: "diagnostic"
+    disabled_by_default: true
   - platform: uptime
     name: Uptime Sensor
     update_interval: 60s
@@ -216,8 +242,9 @@ sensor:
 # ADC needs to be on the Max range, 12dB attenuation
 # The ADC is terrrible!
 # Provide a zero offset, ie when motor not powered it needs to be 0
-# It also needs a gain correction and the low current is not accurate
-# but we really only use it for over current check (redundant with fault).
+# It also needs a gain correction which I have not calibrated so the low 
+# current readings are not accurate. But its really only used as a 
+# redundant fault sensor, the motor controller does most of what is needed.
   - platform: adc
     pin: GPIO32
     name: "Motor Current"
@@ -237,10 +264,18 @@ sensor:
           - throttle: 300s # send a periodic update every 5 minutes
           - delta: 0.010   # send an update when there is a change
 
+  # The rotary encoder seems to produce 6400 pulses per rotation
+  # Use lambda filters to convert this pulse count into rotations by
+  # dividing the raw count by 6400 - need to change with different
+  # motor/encoder!
+  # Use resolution = 4, maybe this is hardware reducing updates?
+  # This encoder is the main trigger for computation, every 1/32 of
+  # a rotation it will produce an event and other copy sensors will
+  # pick that up for further processing.
   - platform: rotary_encoder
     name: Encoder
     entity_category: "diagnostic"
-    disabled_by_default: true
+    disabled_by_default: false
     id: encoder
     pin_a: GPIO36
     pin_b: GPIO39
@@ -248,64 +283,170 @@ sensor:
       number: GPIO26
       mode: input
     restore_mode: RESTORE_DEFAULT_ZERO
+    resolution: 1
     publish_initial_value: true
+    device_class: "distance"
+    unit_of_measurement: "rotations"
+    accuracy_decimals: 3
     filters:
-      - delta: 100
+      - lambda: return (float)x/6336; 
+      - delta: 0.001
 
-  - platform: template
-    name: "Speed"
-    id: speed
-    lambda: |-
-      static int last_value;
-      static float speed;
-      // Gear box has a ~600:1 reduction ratio, one user said it was 576:1. SOmeone reported 6400 pulses per rotation
-      speed = float((id(encoder).state - last_value)) / 6400.0 / 1 * 60.0;
-      last_value = id(encoder).state;
-      if (id(motor_close).state || id(motor_open).state){
-        return speed;
-      } else {
-        return 0.0;
-      }
-    entity_category: "diagnostic"
-    unit_of_measurement: 'rpm'
-    accuracy_decimals: 1
-    update_interval: 1s
+  # This is the main control loop!
+  - platform: copy
+    name: control
+    id: control
+    source_id: encoder
+    unit_of_measurement: "rotations"
     filters:
+      # x is the encoder value from id(encoder)
+      # This code only runs when the motor is running and the encoder
+      # is updating. It controls the speed, slowing the motor as we
+      # near the target to prevent overshoot. Also detects and sets
+      # the at_target binary sensor.
+      - lambda: |-
+          float rotations_remaining;
+          // Calculate how close to target
+          rotations_remaining = id(target).state - x;
+          if (rotations_remaining > 0.5){
+            id(at_target).publish_state(false);
+          }
+          if (id(awning).current_operation == esphome::cover::COVER_OPERATION_OPENING){
+            // when opening rotations_remaining moving +ve to zero
+            if (rotations_remaining <= 0){
+              id(at_target).publish_state(true);
+            }
+          }
+          if (id(awning).current_operation == esphome::cover::COVER_OPERATION_CLOSING){
+            // when closing rotations_remaining moving -ve to zero
+            if (rotations_remaining >= 0){
+              id(at_target).publish_state(true);
+            }
+          }
+          return rotations_remaining;
       - or:
           - throttle: 300s # send a periodic update every 5 minutes
-          - delta: 1.0     # send an update when there is a change
+          - delta: 0.001    # send an update when there is a change
 
-  - platform: template
-    id: position
-    name: "Position"
-    entity_category: "diagnostic"
-    lambda: |-
-        return round((100 * id(encoder).state / (id(max_position).state-id(min_position))));
-    unit_of_measurement: 'percent'
+  # This sensor is the window position as needs to be reported back to home assistant
+  # The sensor's value is a percentage, 0 => 100. HA cover needs 0 => 1.0
+  # Do not use this value internally, its only for reporting back 
+  # Internal position should come from id(encoder)
+  - platform: copy
+    name: Position
+    id: reported_position
+    source_id: encoder
     accuracy_decimals: 0
-    update_interval: 1s
+    entity_category: "diagnostic"
+    disabled_by_default: false
+    unit_of_measurement: "%"
     filters:
+      # x is the encoder value from id(encoder)
+      # This code only runs when the motor is running and the encoder
+      # is updating.
+      - lambda: |-
+          int pos;
+          pos = round(100*id(encoder).state/id(max_position).state);
+          if (pos <= 1) { pos = 0;}
+          if (pos >=99) { pos = 100;}
+          return pos;
       - clamp:
           min_value: 0
           max_value: 100
       - or:
           - throttle: 300s # send a periodic update every 5 minutes
-          - delta: 1.0    # send an update when there is a change
-    on_value:
-      - lambda: |-
-          float pos;
-          pos = id(position).state / 100.0;
-          if (id(target_position) == 100 && pos >= 0.98){
-            ESP_LOGI("awning", "Round position %d%% to 100%",(int)id(position).state);
-            pos = 1.0;
-          }
-          if (id(target_position) == 0 && pos <= 0.02){
-            ESP_LOGI("awning", "Round position %d%% to 0%",(int)id(position).state);
-            pos = 0;
-          }
-          id(awning).position = pos;
-          id(awning).publish_state();
+          - delta: 0.9     # send an update when there is a change
+    on_value: 
+      then:
+        - lambda: |-
+            id(awning).position = x/100;
+            id(awning).publish_state();
 
+  # Measure the speed of the motor
+  # This runs at a fixed update_interval, and does not depend on encoder
+  # rotation (and therefore updates)
+  - platform: template
+    name: "Speed"
+    id: speed
+    entity_category: "diagnostic"
+    disabled_by_default: false
+    lambda: |-
+      static float encoder_value;
+      static float last_value;
+      static float speed;
+      float rotations_remaining;
+      float target_speed;
+      float speed_error;
+      float K;
+      int new_pwm;
+
+      // encoder is already in units of number of rotations, take the difference
+      // between samples, divide by time interval and multiply by 60 for rpm
+      encoder_value = id(encoder).state;
+      speed = (float)(encoder_value - last_value) / 0.1 * 60;
+      last_value = encoder_value;
+
+      // Now control the motor PWM to reach target speed.
+      // This loop runs at a known update interval and is better place
+      // for this algorithm than the control loop
+      // First calculate the target speed given the position and mode
+      // This adapts PWM for varible load as the window winds and it
+      // slows the window down near the target to we dont overshoot.
+      if (id(motor_close).state || id(motor_open).state){
+        rotations_remaining = id(control).state;
+        if (abs(rotations_remaining) < 0.125){
+          // 1/10 speed when very close to target
+          target_speed = 2.0;
+          K = 5;
+        } else if (abs(rotations_remaining) < 0.5){
+          // 1/4 speed as we approach target
+          target_speed = 5.0;
+          K = 2;
+        } else {
+          // default speed when some way from target
+          if (id(quiet_mode).state){
+            // Half speed is much quieter
+            target_speed = 5.0;
+            K = 1;
+          } else {
+            // Full speed
+            target_speed = 10.0;
+            K = 1;
+          }
+        }
+        // speed_error is +ve if motor too slow, -ve if motor is too fast
+        // Note that the proportional coefficient cant be too low otherwise
+        // we will be adding zero and the PWM will not change.
+        // i.e. K=1 => 1 rpm error will increase PWM by 1%
+        // For this reason we adjust K at the same time as the target
+        speed_error = target_speed - abs(speed);
+        new_pwm = (int)(id(pwm).state + K * speed_error);
+        if (new_pwm > 100) { new_pwm = 100;} // maximum clamp
+        if (new_pwm < 10) { new_pwm = 10;};  // minimum clamp
+        id(pwm).publish_state(new_pwm);
+      }
+      if (abs(speed) > 1){
+        id(window_stuck).publish_state(false);
+        id(check_lock).publish_state(false);
+        id(closed_to_endstop).publish_state(false);
+        id(opened_to_endstop).publish_state(false);
+      }
+      return speed;
+    unit_of_measurement: 'rpm'
+    accuracy_decimals: 1
+    update_interval: 0.1s
+    filters:
+      # Average every 5 samples, effective update every 0.5s
+      - sliding_window_moving_average:
+          window_size: 5
+          send_every: 5
+      - or:
+          - throttle: 300s # send a periodic update every 5 minutes
+          - delta: 0.1     # send an update when there is a change
+
+  # Boot counter helps to debug intermittent power supply issues
+  # UI allows us to reset the counter and it should not increment
+  # by itself. Doing so indicates supply is insufficient.
   - platform: template
     name: "Boot Counter"
     id: boot_counter
@@ -317,17 +458,36 @@ sensor:
           - throttle: 300s # send a periodic update every 5 minutes
           - delta: 1.0     # send an update when there is a change
 
+  # Target position is the position we want the window in, it is the
+  # same units as the encoder (number of rotations). 0 represents fully
+  # closed, and id(max_position) reprensents the number of rotations
+  # to reach fully open.
   - platform: template
-    name: "Target"
+    name: "Target Position"
     id: target
-    entity_category: "diagnostic"
-    lambda: return id(target_position);
-  - platform: template
-    name: "Encoder at endstop"
-    id: encoder_at_endstop
+    accuracy_decimals: 3
+    unit_of_measurement: "rotations"
     entity_category: "diagnostic"
 
+  # Set the PWM duty cycle though this diagnostic so we can monitor it
+  - platform: template
+    name: "PWM"
+    id: pwm
+    unit_of_measurement: "%"
+    entity_category: "diagnostic"
+    disabled_by_default: True
+    on_value: 
+      then:
+        - lambda: |-
+            id(motor_en).set_level(x/100);
+
 binary_sensor:
+  # The motor controller has a FAULT output.
+  # This can trigger due to over current in the motor, as would happen when it reaches
+  # an endstop. It could also trigger if there is an under voltage fault, and this can
+  # occur when starting the motor without soft-start. Large current inrush will dip
+  # the supply, especially with some cheaper plug pack adapters. Unfortunately the
+  # controller can not tell us what kind of fault it is.
   - platform: gpio
     pin:
       number: GPIO17
@@ -338,108 +498,91 @@ binary_sensor:
     id: fault
     entity_category: "diagnostic"
     name: "Fault"
-    on_press:
-      - lambda: 
-          if (id(motor_close).state){
-            if (id(window_was_moving)){
-              id(closed_to_endstop) = 1;  
-            }
-            if (id(restarts_remaining) > 0 && !id(closed_to_endstop)){
-              ESP_LOGI("awning", "Restarting Close, restarts remaining=%d",id(restarts_remaining));
-              id(restarts_remaining) = id(restarts_remaining) - 1;
-              id(restart_motor).turn_on();
-            } else if (id(restarts_remaining) == 0){
-              ESP_LOGW("awning", "Window stuck trying to Close");
-              id(window_stuck).publish_state(true);
-              id(motor_close).turn_off();
-            }
-          }
-          if (id(motor_open).state) {
-            if (id(window_was_moving)){
-              id(opened_to_endstop) = 1;
-            }
-            if (id(restarts_remaining) > 0 && !id(opened_to_endstop)){
-              ESP_LOGI("awning", "Restarting Open, restarts remaining=%d",id(restarts_remaining));
-              id(restarts_remaining) = id(restarts_remaining) - 1;
-              id(restart_motor).turn_on();
-            } else if (id(restarts_remaining) == 0){
-              ESP_LOGW("awning", "Window stuck trying to Open");
-              id(window_stuck).publish_state(true);
-              id(motor_open).turn_off();
-            }
-          } 
-#      - logger.log:
-#          level: INFO
-#          format: "Fault detected motor_close=%d, motor_open=%d, closed_to_endstop=%d, opened_to_endstop=%d"
-#          args: ['id(motor_close).state', 'id(motor_open).state','id(closed_to_endstop)', 'id(opened_to_endstop)']
-#    on_release:
-#      - logger.log:
-#          level: INFO
-#          format: "Fault cleared motor_close=%d, motor_open=%d"
-#          args: ['id(motor_close).state', 'id(motor_open).state']
     filters:
-      - delayed_on: 1s   
+      # De-glitch the turn on and hold for 1s so it can be observed in UI
+      - delayed_on: 2s   
+      - delayed_off: 1s   
+    on_press: 
+      then:
+        - lambda: |-
+            fault_action();
 
-# This over current protection should never trigger, the fault should always happen first
   - platform: template
-    id: over_current
+    name: Stall
+    id: stall
+    entity_category: diagnostic
+    disabled_by_default: False
     lambda: |-
-      if (id(motor_current).state > 0.8) {
-        id(motor_en).turn_off();
-        id(motor_close).turn_off();
-        id(motor_open).turn_off();
-        return true;
-      } else {
-        return false;
-      }
-    on_press:
-      - lambda: |-
-          ESP_LOGE("awning", "Over Current Detected, executing stop_action");
-          id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
-          id(awning).publish_state();
-          id(target_position) = id(position).state;
-          id(window_was_moving) = 0;
-          id(motor_close).turn_off();
-          id(motor_open).turn_off();      
-    on_release:
-      - logger.log:
-          level: INFO
-          format: "Over Current cleared motor_close=%d, motor_open=%d"
-          args: ['id(motor_close).state', 'id(motor_open).state']
+      return ((id(motor_close).state || id(motor_open).state) && !id(at_target).state && id(speed).state == 0);
     filters:
-      - delayed_on: 1s   
+      - delayed_on : 800ms
+    on_press: 
+      then:
+        # Since we have stalled, increase the PWM
+        # The normal control sensor is not runnig when we are stalled and there are
+        # no encoder updates. We just need to get the motor running again to get
+        # that control loop activated again.
+        - lambda: id(pwm).publish_state(95);
+
+  - platform: analog_threshold
+    name: Over Current
+    sensor_id: motor_current
+    entity_category: "diagnostic"
+    threshold: 0.8
+    filters:
+      - delayed_on : 1s
+    on_press: 
+      then:
+        - lambda: |-
+            fault_action();
 
   - platform: template
     id: window_stuck
     name: "Window Stuck"
     device_class: problem
 
-  # - platform: template
-  #   id: stall
-  #   lambda: |-
-  #     if (!id(motor_sleep) && id(motor_en).state && id(motor_en_delayed).state && abs(id(speed).state) < 1.0){
-  #       return true;
-  #     } else {
-  #       return false;
-  #     }
-  #   on_press:
-  #     - logger.log:
-  #         level: INFO
-  #         format: "Stall detected motor_close=%d, motor_open=%d"
-  #         args: ['id(motor_close).state', 'id(motor_open).state']
-  #   on_release:
-  #     - logger.log:
-  #         level: INFO
-  #         format: "Stall cleared motor_close=%d, motor_open=%d"
-  #         args: ['id(motor_close).state', 'id(motor_open).state']
-  #   filters:
-  #     - delayed_on: 1s   
+  - platform: template
+    id: check_lock
+    name: "Check Lock"
+    device_class: problem
 
-  # - platform: template
-  #   id: motor_en_delayed
-  #   lambda: return id(motor_en).state;
-  #   filters:
-  #     - delayed_on: 2s   
+  - platform: template
+    name: "Closed to endstop"
+    id: closed_to_endstop
+    entity_category: "diagnostic"
+
+  - platform: template
+    name: "Opened to endstop"
+    id: opened_to_endstop
+    entity_category: "diagnostic"
+
+  - platform: template
+    name: current limit
+    id: current_limit
+    device_class: problem
+
+  # This at_target sensor is set to false when we set a new target position
+  # It is set to true when the motor moves to the target position
+  # Actions are then triggered
+  - platform: template
+    id: at_target
+    name: "at target"
+    disabled_by_default: true
+    entity_category: diagnostic
+    on_press: 
+      then:
+        - lambda: |-
+            int pos;
+            // Window has reached target position, stop the motor
+            id(motor_open).turn_off();
+            id(motor_close).turn_off();
+            // Update the position and state of the cover
+            id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
+            pos = round(100*id(encoder).state/id(max_position).state);
+            if (pos <= 1) { pos = 0;}
+            if (pos >=99) { pos = 100;}
+            id(awning).position = pos;
+            id(awning).publish_state();
 
 text_sensor:
   - platform: wifi_info
@@ -448,166 +591,60 @@ text_sensor:
       entity_category: diagnostic
       disabled_by_default: true
 
+# All the cover needs to do is process the action commands, set the target and
+# start the motor. Once started with a target, the rest of the sensors will
+# look after everything and stop the motor when target is reached.
 cover:
   - platform: template
     name: "Awning"
     id: awning
-    lambda: |-
-      if (id(awning).current_operation == esphome::cover::COVER_OPERATION_OPENING){
-        // Opening Operation
-        if (id(position).state >= id(target_position)){
-          // Opened to the target position, we are done. 
-          // No special handling to open to endstop.
-          id(motor_open).turn_off();            
-          id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
-          id(awning).publish_state();
-          ESP_LOGI("awning", "Opening to %d%% and reached target %d%%", (int)id(position).state, id(target_position));
-        } else if (id(opened_to_endstop)){
-          // We opened to the endstop before reaching position target. Unexpected!
-          id(motor_open).turn_off();            
-          id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
-          id(awning).publish_state();
-          if (id(target_position) >= 10 && id(position).state < 10){
-            ESP_LOGI("awning", "Window appears to be locked, opened to unexpected endstop when position was %d%%", (int)id(position).state);
-            return COVER_CLOSED;
-          } else {
-            ESP_LOGI("awning", "Opened to endstop when position was %d%%", (int)id(position).state);
-          }
-        } else {
-          // We are continuing to open
-          if ((id(target_position) - id(position).state) < 5){
-            // Slow down close to target
-            id(motor_en).set_level(0.25);
-          }
-          if (id(speed).state > 1){
-            // Window is moving
-            id(window_was_moving) = 1;
-            id(window_stuck).publish_state(false);
-            id(closed_to_endstop) = 0;
-          }
-        }
-      } else if (id(awning).current_operation == esphome::cover::COVER_OPERATION_CLOSING){
-        // Closing Operation
-        id(opened_to_endstop) = 0;
-        if (id(position).state <= id(target_position)){
-          // Reached the target position
-          if (id(target_position) > 0 || !id(close_to_endstop).state){
-            // Do not need to get to endstop, we are done
-            id(motor_close).turn_off();
-            ESP_LOGI("awning", "Closed to %d%% when target was %d%%", (int)id(position).state,(int)id(target_position));
-            id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
-            id(awning).publish_state();
-          } else {
-            // We are trying to fully close
-            if (id(closed_to_endstop)){
-                // We are closed at the target and at the endstop, we are done
-                id(motor_close).turn_off();  
-                if (id(encoder).state < -1000){
-                  id(encoder_reset).turn_on();
-                  ESP_LOGI("awning", "Closed to %d%% and to endstop, recalibrating to 0%%",(int)(100 * id(encoder).state / (id(max_position).state-id(min_position))));
-                } else {
-                  ESP_LOGI("awning", "Closed to endstop when at %d%%, calibration good!",(int)(100 * id(encoder).state / (id(max_position).state-id(min_position))));            
-                }
-                id(encoder_at_endstop).publish_state(id(encoder).state);
-                id(closing_to_endstop) = 0;
-                id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
-                id(awning).publish_state();
-            } else if (id(closing_to_endstop)) {
-                // Need to close to endstop, turn the motor back on
-                if (id(speed).state < -1){
-                  // Window is moving
-                  id(window_was_moving) = 1;
-                  id(window_stuck).publish_state(false);
-                }
-            } else {
-                // At close position, not at endstop. Stop the motor to slow momentum and not over
-                // tighten at the endstop. Then set flag to re-start the motor in the next itteration
-                id(closing_to_endstop) = 1;
-                ESP_LOGI("awning", "Closed to position %d%%, now closing to endstop", (int)id(position).state);
-            }
-          }
-        } else if (id(closed_to_endstop)) {
-            // We have closed to the endstop before the postition says we are closed
-            // We are done, but may need to recalibrate the encoder
-            id(motor_open).turn_off();
-            if (id(encoder).state > 1000){
-              id(encoder_reset).turn_on();
-              ESP_LOGI("awning", "Closed to endstop when at %d%%, recalibrating to 0%%",(int)(100 * id(encoder).state / (id(max_position).state-id(min_position))));
-            } else {
-              ESP_LOGI("awning", "Closed to endstop when at %d%%, calibration good!",(int)(100 * id(encoder).state / (id(max_position).state-id(min_position))));
-            }
-            id(encoder_at_endstop).publish_state(id(encoder).state);
-            id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
-            id(awning).publish_state();
-        } else {
-          // We are continuing to close
-          if ((id(position).state - id(target_position)) < 5){
-            // Slow down close to target
-            id(motor_en).set_level(0.25);
-          }
-          if (id(speed).state < -1){
-            // Window is moving
-            id(window_was_moving) = 1;
-            id(opened_to_endstop) = 0;
-            id(window_stuck).publish_state(false);
-          }
-        }
-      } else {
-        // We are idle, return last state
-        if (id(awning).current_operation != esphome::cover::COVER_OPERATION_IDLE){
-          id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
-          id(awning).publish_state();
-        }
-        return {};
-      }
-      return {};
+    lambda: return {};
     open_action:
       - lambda: |-
           ESP_LOGI("awning", "Executing open_action, opened_to_endstop=%d", id(opened_to_endstop));
-          id(target_position) = 100;
+          // To open, set the target to the maximum position
+          id(target).publish_state(id(max_position).state);
+          id(at_target).publish_state(false);
           id(awning).current_operation = esphome::cover::COVER_OPERATION_OPENING;
-          if (id(motor_close).state){
-            id(motor_close).turn_off();
-          }
-          id(window_was_moving) = 0;
-          id(restarts_remaining) = 10;
+          id(awning).publish_state();
           id(motor_open).turn_on();
+          id(current_limit).publish_state(false);
     close_action:
       - lambda: |-
           ESP_LOGI("awning", "Executing close_action, closed_to_endstop=%d", id(closed_to_endstop));
-          id(target_position) = 0;
+          // To close, set the target to the minimum position, which is 0
+          id(target).publish_state(0);
+          id(at_target).publish_state(false);
           id(awning).current_operation = esphome::cover::COVER_OPERATION_CLOSING;
-          if (id(motor_open).state){
-            id(motor_open).turn_off();
-          }
-          id(restarts_remaining) = 10;
-          id(window_was_moving) = 0;
+          id(awning).publish_state();
           id(motor_close).turn_on();
+          id(current_limit).publish_state(false);
     stop_action:
       - lambda: |-
           ESP_LOGI("awning", "Executing stop_action");
-          id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
-          id(target_position) = id(position).state;
-          id(window_was_moving) = 0;
-          id(window_stuck).publish_state(false);
           id(motor_close).turn_off();
           id(motor_open).turn_off();
+          // When manually stopped the target position is where the window is
+          id(target).publish_state(id(encoder).state);
+          id(awning).current_operation = esphome::cover::COVER_OPERATION_IDLE;
+          id(awning).publish_state();
+          id(current_limit).publish_state(false);
     position_action:
       - lambda: |-
-          id(target_position) = 100 * pos;
-          if (id(position).state > id(target_position)){
-            ESP_LOGI("awning", "Executing position_action, closing from %d%% to %d%%", (int)(id(position).state, (int)(100 * pos)));
+          // When asked to move to a position, we get a float 0->1, and multiply by max_position
+          id(target).publish_state(pos*id(max_position).state);
+          id(at_target).publish_state(false);
+          if (id(encoder).state > id(target).state){
+            ESP_LOGI("awning", "Executing position_action, closing from %d%% to %d%%", (int)(id(encoder).state, (int)(100 * pos)));
             id(awning).current_operation = esphome::cover::COVER_OPERATION_CLOSING;
-            id(restarts_remaining) = 10;
-            id(window_was_moving) = 0;
             id(motor_close).turn_on();
-          } else if (id(position).state < id(target_position)){
-            ESP_LOGI("awning", "Executing position_action, opening from %d%% to %d%%", (int)(id(position).state, (int)(100 * pos)));
+          } else if (id(encoder).state < id(target).state){
+            ESP_LOGI("awning", "Executing position_action, opening from %d%% to %d%%", (int)(id(encoder).state, (int)(100 * pos)));
             id(awning).current_operation = esphome::cover::COVER_OPERATION_OPENING;
-            id(restarts_remaining) = 10;
-            id(window_was_moving) = 0;
             id(motor_open).turn_on();
           }
+          id(awning).publish_state();
+          id(current_limit).publish_state(false);
     has_position: True
           
 
